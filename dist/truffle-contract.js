@@ -373,21 +373,56 @@ var contract = (function(module) {
             tx_params.data = self.binary;
           }
 
-          // web3 0.9.0 and above calls new this callback twice.
-          // Why, I have no idea...
+          // web3 calls this callback twice, the first time when web3_instance.transactionHash
+          // is set, and the second time when the transaction was mined and web3_instance.address
+          // and its instance methods mapped to contract functions are set.
+          //
+          // Currently, MetaMask has a bug (github.com/MetaMask/metamask-extension/issues/2426)
+          // which prevents MetaMask-provided web3 from calling the callback the second time
+          // and from setting contract's instance methods, so we need to handle this manually.
+          //
           var intermediary = function(err, web3_instance) {
             if (err != null) {
               reject(err);
               return;
             }
 
-            if (err == null && web3_instance != null && web3_instance.address != null) {
-              accept(new self(web3_instance));
+            if (web3_instance == null) {
+              reject(new Error("An instance of web3 contract should not be null; this is probably a bug in web3"));
+              return;
             }
+
+            // We have to throw web3_instance away as, under current version of MetaMask, its
+            // instance methods end up never being set. We work this around by consturcting
+            // new web3 contract instance with contract_class.at once we know contract address,
+            // see below.
+
+            accept([contract_class, web3_instance.transactionHash]);
           };
 
           args.push(tx_params, intermediary);
           contract_class.new.apply(contract_class, args);
+        });
+      }).then(function(args) {
+        var contract_class = args[0]
+        var transactionHash = args[1]
+        return new Promise(function(accept, reject) {
+          // web3.eth.filter("latest") doesn't work with MetaMask for some reason,
+          // so we have to resort to polling.
+          function check() {
+            self.web3.eth.getTransactionReceipt(transactionHash, function(err, receipt) {
+              if (err) {
+                return;
+              }
+              if (receipt == null) {
+                setTimeout(check, 1000);
+                return;
+              }
+              var web3_instance = contract_class.at(receipt.contractAddress);
+              accept(new self(web3_instance));
+            });
+          }
+          setTimeout(check, 500);
         });
       });
     },
